@@ -24,6 +24,7 @@ type MergedPrEvent = {
 type DocClaim = {
 	id: string;
 	pageId: string;
+	repoFullName: string;
 	sectionId: string;
 	text: string;
 	kind: string;
@@ -37,6 +38,7 @@ type DocClaim = {
 type DocSection = {
 	id: string;
 	pageId: string;
+	repoFullName: string;
 	title: string;
 	notionPageUrl: string;
 	sourceMarkdownHash: string;
@@ -172,24 +174,40 @@ worker.webhook("githubPullRequestWebhook", {
 				const changedFiles = await fetchPullRequestFiles(parsed);
 				const eventWithFiles = { ...parsed, changedFiles };
 				const claims = await listDocClaims(notion);
-				const matches = rankClaimsForChangedFiles(eventWithFiles, claims).slice(0, 8);
+				const repoFullName = `${parsed.owner}/${parsed.repo}`;
+				const matches = rankClaimsForChangedFiles(
+					eventWithFiles,
+					claims.filter((claim) => claim.repoFullName === repoFullName),
+				).slice(0, 8);
 				const impactedClaimIds = matches.map((match) => match.claim.id);
 				const impactedSectionIds = unique(
 					matches.map((match) => match.claim.sectionId).filter(Boolean),
 				);
+				const autoUpdate = await autoApplyDirectEvidenceUpdate(
+					notion,
+					parsed,
+					changedFiles,
+					matches,
+				);
 
 				await updateMergedPrPage(notion, prPageId, {
 					changedFiles,
-					status: "Ready for Agent",
+					status: autoUpdate.applied ? "Applied" : "Ready for Agent",
 					impactedClaimIds,
 					impactedSectionIds,
 					agentSummary:
-						matches.length > 0
+						autoUpdate.applied
+							? `Applied 1 section update from direct changed-file evidence.`
+							: matches.length > 0
 							? `Ready for agent. Matched ${matches.length} impacted claim(s).`
 							: "Ready for agent. No matching claims found; likely needs review.",
 				});
 
-				console.log(`Merged PR #${parsed.number} is ready for agent review`);
+				console.log(
+					autoUpdate.applied
+						? `Merged PR #${parsed.number} applied a safe doc update`
+						: `Merged PR #${parsed.number} is ready for agent review`,
+				);
 			} catch (error) {
 				await updateMergedPrPage(notion, prPageId, {
 					status: "Error",
@@ -284,9 +302,10 @@ worker.tool("get_repo_context_bundle", {
 		const pr = mergedPrFromPage(page);
 		const changedFiles = splitMultiValue(pr.changedFiles);
 		const claims = await listDocClaims(notion);
+		const repoFullName = repoFullNameFromPrUrl(pr.prUrl);
 		const matches = rankClaimsForChangedFiles(
 			{ title: pr.name, body: "", changedFiles },
-			claims,
+			repoFullName ? claims.filter((claim) => claim.repoFullName === repoFullName) : claims,
 		).slice(0, 8);
 		const sections = await sectionsForClaims(notion, matches.map((match) => match.claim));
 
@@ -319,10 +338,11 @@ worker.tool("propose_doc_patch", {
 		const pr = prPage ? mergedPrFromPage(prPage) : null;
 		const changedFiles = pr ? splitMultiValue(pr.changedFiles) : [];
 		const claims = await listDocClaims(notion);
-		const matches = rankClaimsForChangedFiles({ title: "", body: "", changedFiles }, claims).slice(
-			0,
-			8,
-		);
+		const repoFullName = pr ? repoFullNameFromPrUrl(pr.prUrl) : "";
+		const matches = rankClaimsForChangedFiles(
+			{ title: "", body: "", changedFiles },
+			repoFullName ? claims.filter((claim) => claim.repoFullName === repoFullName) : claims,
+		).slice(0, 8);
 		const impactedClaimIds = new Set(matches.map((match) => match.claim.id));
 		const impactedSectionIds = new Set(
 			matches.map((match) => match.claim.sectionId).filter(Boolean),
@@ -737,6 +757,7 @@ async function listDocClaims(notion: NotionClient): Promise<DocClaim[]> {
 			claims.push({
 				id: propertyText(props["Claim ID"]) || asString(page.id),
 				pageId: asString(page.id),
+				repoFullName: propertyText(props["Repo Key"]),
 				sectionId: propertyText(props["Section ID"]),
 				text: propertyTitle(props.Claim),
 				kind: propertySelect(props.Kind),
@@ -789,6 +810,7 @@ function sectionFromPage(page: Record<string, unknown>): DocSection {
 	return {
 		id: propertyText(props["Section ID"]) || asString(page.id),
 		pageId: asString(page.id),
+		repoFullName: propertyText(props["Repo Key"]),
 		title: propertyTitle(props.Name),
 		notionPageUrl: propertyUrl(props["Notion Page"]),
 		sourceMarkdownHash: propertyText(props["Source Markdown Hash"]),
@@ -841,6 +863,66 @@ function pathsOverlap(changedFile: string, claimPath: string): boolean {
 	const claim = normalizePath(claimPath);
 	if (!changed || !claim) return false;
 	return changed === claim || changed.startsWith(`${claim}/`) || claim.startsWith(`${changed}/`);
+}
+
+async function autoApplyDirectEvidenceUpdate(
+	notion: NotionClient,
+	event: MergedPrEvent,
+	changedFiles: string[],
+	matches: ClaimMatch[],
+): Promise<{ applied: boolean; reason?: string }> {
+	const firstMatch = matches.find((match) =>
+		match.reasons.some((reason) => reason.startsWith("path:") || reason.startsWith("evidence:")),
+	);
+
+	if (!firstMatch) {
+		return { applied: false, reason: "no_direct_evidence_match" };
+	}
+
+	const section = await findSectionById(notion, firstMatch.claim.sectionId);
+	const repoFullName = `${event.owner}/${event.repo}`;
+	if (!section || section.repoFullName !== repoFullName) {
+		return { applied: false, reason: "section_not_found_or_repo_mismatch" };
+	}
+
+	if (!section.notionPageUrl) {
+		return { applied: false, reason: "section_missing_notion_page" };
+	}
+
+	const markdown = [
+		`# ${section.title}`,
+		"",
+		`Repository: ${repoFullName}`,
+		"",
+		"## Latest Verified Change",
+		"",
+		`Merged PR #${event.number} (${event.title}) changed ${changedFiles.join(", ")}.`,
+		"",
+		"Managed by NBrain. If this page is manually edited, NBrain will create a Review Queue task before overwriting it.",
+	].join("\n");
+
+	await replaceSectionPage(notion, section, markdown);
+	await recordDocUpdateRun(notion, {
+		prNumber: event.number,
+		status: "Applied",
+		proposedOperations: JSON.stringify({
+			summary: `Auto-applied direct evidence update for PR #${event.number}.`,
+			operations: [
+				{
+					type: "replace_section",
+					sectionId: section.id,
+					expectedRenderedHash: section.renderedNotionHash,
+					evidenceRefs: changedFiles,
+					removedClaimIds: [],
+				},
+			],
+		}),
+		appliedSectionIds: [section.id],
+		reviewTaskIds: [],
+		logs: ["Auto-applied direct changed-file evidence in webhook."],
+	});
+
+	return { applied: true };
 }
 
 async function verifyPatchProposal(
@@ -1015,11 +1097,13 @@ async function addClaim(
 	},
 	evidenceRefs: string[],
 ): Promise<void> {
+	const section = await findSectionById(notion, sectionId);
 	await notion.pages.create({
 		parent: { data_source_id: await dataSourceId(notion, "docClaims") },
 		properties: {
 			Claim: title(claim.text),
 			"Claim ID": richText(crypto.randomUUID()),
+			"Repo Key": richText(section?.repoFullName ?? ""),
 			"Section ID": richText(sectionId),
 			Kind: select(claim.kind ?? "concept"),
 			Status: select("fresh"),
@@ -1208,6 +1292,11 @@ function normalizeNotionId(value: string): string {
 
 function notionIdFromUrl(value: string): string {
 	return normalizeNotionId(value);
+}
+
+function repoFullNameFromPrUrl(value: string): string {
+	const match = value.match(/github\.com\/([^/]+)\/([^/]+)\/pull\//);
+	return match ? `${match[1]}/${match[2]}` : "";
 }
 
 function unique<T>(items: T[]): T[] {

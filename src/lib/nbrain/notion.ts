@@ -105,10 +105,14 @@ export function createNotionAdapter(): NotionPort {
       const hubPageId = hub.id;
       const hubUrl = "url" in hub ? hub.url : undefined;
       const configuredDatabases = configuredDatabaseLinks();
+      if (configuredDatabases) {
+        await ensureNBrainDataSourceProperties(notion, configuredDatabases);
+      }
 
       const databases = configuredDatabases ?? {
         docSections: await createDatabase(notion, hubPageId, "Doc Sections", {
           Name: { title: {} },
+          "Repo Key": { rich_text: {} },
           Repo: { rich_text: {} },
           "Section ID": { rich_text: {} },
           "Notion Page": { url: {} },
@@ -121,6 +125,7 @@ export function createNotionAdapter(): NotionPort {
         docClaims: await createDatabase(notion, hubPageId, "Doc Claims", {
           Claim: { title: {} },
           "Claim ID": { rich_text: {} },
+          "Repo Key": { rich_text: {} },
           Kind: { select: {} },
           Status: { select: {} },
           "Section ID": { rich_text: {} },
@@ -197,6 +202,7 @@ export function createNotionAdapter(): NotionPort {
           parent: { data_source_id: await dataSourceId(notion, workspace.databases.docSections) },
           properties: {
             Name: titleProperty(section.title),
+            "Repo Key": richTextProperty(section.repoFullName),
             "Section ID": richTextProperty(section.id),
             "Notion Page": urlProperty(section.notionUrl),
             "Source Markdown Hash": richTextProperty(section.sourceMarkdownHash),
@@ -214,6 +220,7 @@ export function createNotionAdapter(): NotionPort {
           properties: {
             Claim: titleProperty(claim.text),
             "Claim ID": richTextProperty(claim.id),
+            "Repo Key": richTextProperty(sections.find((section) => section.id === claim.sectionId)?.repoFullName ?? ""),
             Kind: selectProperty(claim.kind),
             Status: selectProperty(claim.staleStatus),
             "Section ID": richTextProperty(claim.sectionId),
@@ -372,6 +379,39 @@ async function dataSourceId(notion: Client, databaseId: string): Promise<string>
 
   dataSourceIdCache.set(normalizedDatabaseId, id);
   return id;
+}
+
+async function ensureNBrainDataSourceProperties(
+  notion: Client,
+  databases: RequiredNotionDatabaseLinks,
+): Promise<void> {
+  await Promise.all([
+    ensureRichTextProperty(notion, databases.docSections, "Repo Key"),
+    ensureRichTextProperty(notion, databases.docClaims, "Repo Key"),
+  ]);
+}
+
+async function ensureRichTextProperty(
+  notion: Client,
+  databaseId: string,
+  propertyName: string,
+): Promise<void> {
+  const sourceId = await dataSourceId(notion, databaseId);
+  const source = (await notion.dataSources.retrieve({
+    data_source_id: sourceId,
+  } as unknown as Parameters<typeof notion.dataSources.retrieve>[0])) as Record<string, unknown>;
+  const properties = source.properties as Record<string, unknown> | undefined;
+
+  if (properties?.[propertyName]) {
+    return;
+  }
+
+  await notion.dataSources.update({
+    data_source_id: sourceId,
+    properties: {
+      [propertyName]: { type: "rich_text", rich_text: {} },
+    },
+  } as unknown as Parameters<typeof notion.dataSources.update>[0]);
 }
 
 async function createDatabase(
