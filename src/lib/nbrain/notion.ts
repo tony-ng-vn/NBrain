@@ -417,7 +417,7 @@ function urlProperty(url: string | undefined) {
 function markdownToBlocks(markdown: string): Array<Record<string, unknown>> {
   return markdown
     .split("\n")
-    .slice(0, 90)
+    .slice(0, 24)
     .map((line) => line.trimEnd())
     .filter((line, index, lines) => line.length > 0 || index === lines.length - 1)
     .map((line) => {

@@ -78,7 +78,7 @@ export async function readGitHubRepoGuide(
         "",
         "## Reference Paths",
         "",
-        ...referencePaths.slice(0, 30).map((path) => `- ${path}`),
+        ...referencePaths.slice(0, 12).map((path) => `- ${path}`),
         "",
         "## README",
         "",
