@@ -21,15 +21,18 @@ export async function readDeepWikiRepoGuide(repoFullName: string): Promise<DeepW
         callDeepWikiTool(client, "read_wiki_contents", repoFullName),
       ]);
 
-      const sections = splitMarkdownSections(contents, repoFullName).map((section) => ({
-        ...section,
-        sourceSnapshot: {
-          provider: "deepwiki",
-          endpoint,
-          repoFullName,
-          structure: structure.slice(0, 4000),
-        },
-      }));
+      const sections = splitMarkdownSections(contents, repoFullName)
+        .filter(hasUsefulWikiContent)
+        .slice(0, 5)
+        .map((section) => ({
+          ...section,
+          sourceSnapshot: {
+            provider: "deepwiki",
+            endpoint,
+            repoFullName,
+            structure: structure.slice(0, 4000),
+          },
+        }));
 
       return sections.length > 0 ? sections : fallbackDeepWikiSections(repoFullName, "empty");
     } finally {
@@ -99,7 +102,7 @@ function splitMarkdownSections(markdown: string, repoFullName: string): DeepWiki
   }
 
   const chunks = normalized.split(/\n(?=#{1,2}\s+)/g).filter(Boolean);
-  const selected = (chunks.length > 1 ? chunks : [normalized]).slice(0, 5);
+  const selected = chunks.length > 1 ? chunks : [normalized];
 
   return selected.map((chunk, index) => {
     const title =
@@ -116,6 +119,17 @@ function splitMarkdownSections(markdown: string, repoFullName: string): DeepWiki
       },
     };
   });
+}
+
+function hasUsefulWikiContent(section: DeepWikiSection): boolean {
+  const plain = section.markdown
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\[[^\]]+\]\([^)]*\)/g, "")
+    .replace(/[`*_>-]/g, "")
+    .trim();
+
+  return plain.length > 120;
 }
 
 function fallbackDeepWikiSections(repoFullName: string, reason: string): DeepWikiSection[] {

@@ -751,34 +751,84 @@ function propertyUrl(page: Record<string, unknown>, propertyName: string): strin
 }
 
 function markdownToBlocks(markdown: string): Array<Record<string, unknown>> {
-  return markdown
-    .split("\n")
-    .slice(0, 24)
-    .map((line) => line.trimEnd())
-    .filter((line, index, lines) => line.length > 0 || index === lines.length - 1)
-    .map((line) => {
-      if (line.startsWith("### ")) {
-        return headingBlock("heading_3", line.slice(4));
+  const blocks: Array<Record<string, unknown>> = [];
+  const lines = markdown.split("\n").map((line) => line.trimEnd());
+  let codeLines: string[] | null = null;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+
+    if (blocks.length >= 90) {
+      break;
+    }
+
+    if (line.startsWith("```")) {
+      if (codeLines) {
+        blocks.push(codeBlock(codeLines.join("\n")));
+        codeLines = null;
+      } else {
+        codeLines = [];
       }
-      if (line.startsWith("## ")) {
-        return headingBlock("heading_2", line.slice(3));
-      }
-      if (line.startsWith("# ")) {
-        return headingBlock("heading_1", line.slice(2));
-      }
-      if (line.startsWith("- ")) {
-        return {
-          object: "block",
-          type: "bulleted_list_item",
-          bulleted_list_item: { rich_text: text(line.slice(2)) },
-        };
-      }
-      return {
+      continue;
+    }
+
+    if (codeLines) {
+      codeLines.push(rawLine);
+      continue;
+    }
+
+    if (!line || line === "<details>" || line === "</details>" || line.startsWith("<summary>")) {
+      continue;
+    }
+
+    if (/^-{3,}$/.test(line)) {
+      blocks.push({ object: "block", type: "divider", divider: {} });
+      continue;
+    }
+
+    if (line.startsWith("### ")) {
+      blocks.push(headingBlock("heading_3", line.slice(4)));
+      continue;
+    }
+    if (line.startsWith("## ")) {
+      blocks.push(headingBlock("heading_2", line.slice(3)));
+      continue;
+    }
+    if (line.startsWith("# ")) {
+      blocks.push(headingBlock("heading_1", line.slice(2)));
+      continue;
+    }
+    if (line.startsWith("- ")) {
+      blocks.push({
         object: "block",
-        type: "paragraph",
-        paragraph: { rich_text: line ? text(line) : [] },
-      };
+        type: "bulleted_list_item",
+        bulleted_list_item: { rich_text: text(line.slice(2)) },
+      });
+      continue;
+    }
+
+    const numbered = line.match(/^\d+\.\s+(.+)$/);
+    if (numbered) {
+      blocks.push({
+        object: "block",
+        type: "numbered_list_item",
+        numbered_list_item: { rich_text: text(numbered[1] ?? "") },
+      });
+      continue;
+    }
+
+    blocks.push({
+      object: "block",
+      type: "paragraph",
+      paragraph: { rich_text: text(line) },
     });
+  }
+
+  if (codeLines && blocks.length < 90) {
+    blocks.push(codeBlock(codeLines.join("\n")));
+  }
+
+  return blocks.length > 0 ? blocks : [paragraphBlock("No generated documentation content was available.")];
 }
 
 function headingBlock(type: "heading_1" | "heading_2" | "heading_3", content: string) {
@@ -789,8 +839,69 @@ function headingBlock(type: "heading_1" | "heading_2" | "heading_3", content: st
   };
 }
 
+function paragraphBlock(content: string) {
+  return {
+    object: "block",
+    type: "paragraph",
+    paragraph: { rich_text: text(content) },
+  };
+}
+
+function codeBlock(content: string) {
+  return {
+    object: "block",
+    type: "code",
+    code: {
+      rich_text: text(content),
+      language: "plain text",
+    },
+  };
+}
+
 function text(content: string) {
-  return [{ type: "text", text: { content: truncate(content, 1900) } }];
+  return richTextFromMarkdown(truncate(stripMarkdownLinks(content), 1900));
+}
+
+function richTextFromMarkdown(content: string): Array<Record<string, unknown>> {
+  const chunks: Array<Record<string, unknown>> = [];
+  const pattern = /(\*\*([^*]+)\*\*)|(`([^`]+)`)/g;
+  let cursor = 0;
+
+  for (const match of content.matchAll(pattern)) {
+    if (match.index === undefined) {
+      continue;
+    }
+
+    if (match.index > cursor) {
+      chunks.push(richTextChunk(content.slice(cursor, match.index)));
+    }
+
+    if (match[2]) {
+      chunks.push(richTextChunk(match[2], { bold: true }));
+    } else if (match[4]) {
+      chunks.push(richTextChunk(match[4], { code: true }));
+    }
+
+    cursor = match.index + match[0].length;
+  }
+
+  if (cursor < content.length) {
+    chunks.push(richTextChunk(content.slice(cursor)));
+  }
+
+  return chunks.filter((chunk) => ((chunk.text as Record<string, unknown>).content as string).length > 0);
+}
+
+function richTextChunk(content: string, annotations: Record<string, boolean> = {}) {
+  return {
+    type: "text",
+    text: { content },
+    annotations,
+  };
+}
+
+function stripMarkdownLinks(content: string): string {
+  return content.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
 }
 
 function truncate(content: string, length: number): string {
