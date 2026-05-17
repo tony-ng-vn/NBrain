@@ -871,58 +871,75 @@ async function autoApplyDirectEvidenceUpdate(
 	changedFiles: string[],
 	matches: ClaimMatch[],
 ): Promise<{ applied: boolean; reason?: string }> {
-	const firstMatch = matches.find((match) =>
-		match.reasons.some((reason) => reason.startsWith("path:") || reason.startsWith("evidence:")),
-	);
-
-	if (!firstMatch) {
-		return { applied: false, reason: "no_direct_evidence_match" };
-	}
-
-	const section = await findSectionById(notion, firstMatch.claim.sectionId);
 	const repoFullName = `${event.owner}/${event.repo}`;
-	if (!section || section.repoFullName !== repoFullName) {
-		return { applied: false, reason: "section_not_found_or_repo_mismatch" };
+	let skippedReason = "no_direct_evidence_match";
+
+	for (const match of matches) {
+		if (!match.reasons.some((reason) => reason.startsWith("path:") || reason.startsWith("evidence:"))) {
+			continue;
+		}
+
+		const section = await findSectionById(notion, match.claim.sectionId);
+		if (!section || section.repoFullName !== repoFullName) {
+			skippedReason = "section_not_found_or_repo_mismatch";
+			continue;
+		}
+
+		if (!section.notionPageUrl) {
+			skippedReason = "section_missing_notion_page";
+			continue;
+		}
+
+		if (!(await sectionPageIsEditable(notion, section))) {
+			skippedReason = "section_page_archived_or_trashed";
+			continue;
+		}
+
+		const markdown = [
+			`# ${section.title}`,
+			"",
+			`Repository: ${repoFullName}`,
+			"",
+			"## Latest Verified Change",
+			"",
+			`Merged PR #${event.number} (${event.title}) changed ${changedFiles.join(", ")}.`,
+			"",
+			"Managed by NBrain. If this page is manually edited, NBrain will create a Review Queue task before overwriting it.",
+		].join("\n");
+
+		await replaceSectionPage(notion, section, markdown);
+		await recordDocUpdateRun(notion, {
+			prNumber: event.number,
+			status: "Applied",
+			proposedOperations: JSON.stringify({
+				summary: `Auto-applied direct evidence update for PR #${event.number}.`,
+				operations: [
+					{
+						type: "replace_section",
+						sectionId: section.id,
+						expectedRenderedHash: section.renderedNotionHash,
+						evidenceRefs: changedFiles,
+						removedClaimIds: [],
+					},
+				],
+			}),
+			appliedSectionIds: [section.id],
+			reviewTaskIds: [],
+			logs: ["Auto-applied direct changed-file evidence in webhook."],
+		});
+
+		return { applied: true };
 	}
 
-	if (!section.notionPageUrl) {
-		return { applied: false, reason: "section_missing_notion_page" };
-	}
+	return { applied: false, reason: skippedReason };
+}
 
-	const markdown = [
-		`# ${section.title}`,
-		"",
-		`Repository: ${repoFullName}`,
-		"",
-		"## Latest Verified Change",
-		"",
-		`Merged PR #${event.number} (${event.title}) changed ${changedFiles.join(", ")}.`,
-		"",
-		"Managed by NBrain. If this page is manually edited, NBrain will create a Review Queue task before overwriting it.",
-	].join("\n");
+async function sectionPageIsEditable(notion: NotionClient, section: DocSection): Promise<boolean> {
+	const pageId = notionIdFromUrl(section.notionPageUrl);
+	if (!pageId) return false;
 
-	await replaceSectionPage(notion, section, markdown);
-	await recordDocUpdateRun(notion, {
-		prNumber: event.number,
-		status: "Applied",
-		proposedOperations: JSON.stringify({
-			summary: `Auto-applied direct evidence update for PR #${event.number}.`,
-			operations: [
-				{
-					type: "replace_section",
-					sectionId: section.id,
-					expectedRenderedHash: section.renderedNotionHash,
-					evidenceRefs: changedFiles,
-					removedClaimIds: [],
-				},
-			],
-		}),
-		appliedSectionIds: [section.id],
-		reviewTaskIds: [],
-		logs: ["Auto-applied direct changed-file evidence in webhook."],
-	});
-
-	return { applied: true };
+	const page = (await notion.pages.retrieve({ page_id: pageId } as never)) as Record<string, unknown>;
+	return page.archived !== true && page.in_trash !== true;
 }
 
 async function verifyPatchProposal(

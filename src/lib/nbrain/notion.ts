@@ -15,6 +15,7 @@ export type RequiredNotionDatabaseLinks = {
 export type NotionWorkspace = {
   hubPageId: string;
   hubUrl?: string;
+  repoPageId?: string;
   databases: RequiredNotionDatabaseLinks;
 };
 
@@ -33,6 +34,8 @@ export type NotionPort = {
     parentPageId: string;
     repoFullName: string;
     githubUrl: string;
+    defaultBranch?: string;
+    importRunId?: string;
   }): Promise<NotionWorkspace>;
   createSectionPage(args: {
     hubPageId: string;
@@ -70,6 +73,7 @@ const DATABASE_ENV = {
   docUpdateRuns: "NBRAIN_DOC_UPDATE_RUNS_DATABASE_ID",
   reviewQueue: "NBRAIN_REVIEW_QUEUE_DATABASE_ID",
 } as const;
+const DEFAULT_REPO_SOURCES_DATABASE_ID = "84a06a2583a4445aba3fe09824a5f2a4";
 
 export function getNotionClient(): Client {
   const token = process.env.NOTION_TOKEN;
@@ -84,30 +88,33 @@ export function getNotionClient(): Client {
 
 export function createNotionAdapter(): NotionPort {
   return {
-    async createWorkspace({ parentPageId, repoFullName, githubUrl }) {
+    async createWorkspace({ parentPageId, repoFullName, githubUrl, defaultBranch, importRunId }) {
       const notion = getNotionClient();
-      const hub = await notion.pages.create({
-        parent: { page_id: normalizeNotionId(parentPageId) },
-        properties: {
-          title: titleProperty(`${repoFullName} Repo Knowledge Hub`),
-        },
-        children: markdownToBlocks(
-          [
-            `# ${repoFullName} Repo Guide`,
-            "",
-            `GitHub: ${githubUrl}`,
-            "",
-            "NBrain manages the linked Repo Guide pages, Claims & Evidence, and Review Queue for this prototype.",
-          ].join("\n"),
-        ),
-      } as unknown as Parameters<typeof notion.pages.create>[0]);
-
-      const hubPageId = hub.id;
-      const hubUrl = "url" in hub ? hub.url : undefined;
       const configuredDatabases = configuredDatabaseLinks();
       if (configuredDatabases) {
         await ensureNBrainDataSourceProperties(notion, configuredDatabases);
       }
+      const repoSource = configuredDatabases
+        ? await upsertRepoSourcePage(notion, {
+            parentPageId,
+            repoFullName,
+            githubUrl,
+            defaultBranch,
+            importRunId,
+          })
+        : null;
+      const hub =
+        repoSource ??
+        (await notion.pages.create({
+          parent: { page_id: normalizeNotionId(parentPageId) },
+          properties: {
+            title: titleProperty(`${repoFullName} Repo Knowledge Hub`),
+          },
+          children: markdownToBlocks(repoHubMarkdown(repoFullName, githubUrl)),
+        } as unknown as Parameters<typeof notion.pages.create>[0]));
+
+      const hubPageId = hub.id;
+      const hubUrl = "url" in hub ? hub.url : undefined;
 
       const databases = configuredDatabases ?? {
         docSections: await createDatabase(notion, hubPageId, "Doc Sections", {
@@ -174,6 +181,7 @@ export function createNotionAdapter(): NotionPort {
       return {
         hubPageId,
         hubUrl,
+        repoPageId: repoSource?.id,
         databases,
       };
     },
@@ -202,6 +210,7 @@ export function createNotionAdapter(): NotionPort {
           parent: { data_source_id: await dataSourceId(notion, workspace.databases.docSections) },
           properties: {
             Name: titleProperty(section.title),
+            ...(workspace.repoPageId ? { Repo: relationProperty(workspace.repoPageId) } : {}),
             "Repo Key": richTextProperty(section.repoFullName),
             "Section ID": richTextProperty(section.id),
             "Notion Page": urlProperty(section.notionUrl),
@@ -239,6 +248,7 @@ export function createNotionAdapter(): NotionPort {
         parent: { data_source_id: await dataSourceId(notion, workspace.databases.mergedPrs) },
         properties: {
           Name: titleProperty(`PR #${event.number}: ${event.title}`),
+          ...(workspace.repoPageId ? { Repo: relationProperty(workspace.repoPageId) } : {}),
           "PR Number": { number: event.number },
           "PR URL": urlProperty(event.htmlUrl),
           "Base Branch": richTextProperty(event.baseBranch),
@@ -361,6 +371,10 @@ function configuredDatabaseLinks(): RequiredNotionDatabaseLinks | null {
   };
 }
 
+function repoSourcesDatabaseId(): string | null {
+  return normalizeNotionId(process.env.NBRAIN_REPO_SOURCES_DATABASE_ID ?? DEFAULT_REPO_SOURCES_DATABASE_ID);
+}
+
 async function dataSourceId(notion: Client, databaseId: string): Promise<string> {
   const normalizedDatabaseId = normalizeNotionId(databaseId);
   const cached = dataSourceIdCache.get(normalizedDatabaseId);
@@ -389,6 +403,150 @@ async function ensureNBrainDataSourceProperties(
     ensureRichTextProperty(notion, databases.docSections, "Repo Key"),
     ensureRichTextProperty(notion, databases.docClaims, "Repo Key"),
   ]);
+}
+
+async function upsertRepoSourcePage(
+  notion: Client,
+  input: {
+    parentPageId: string;
+    repoFullName: string;
+    githubUrl: string;
+    defaultBranch?: string;
+    importRunId?: string;
+  },
+): Promise<CreatePageResponseLike> {
+  const databaseId = repoSourcesDatabaseId();
+  if (!databaseId) {
+    return createHubPage(notion, input.parentPageId, input.repoFullName, input.githubUrl);
+  }
+
+  const sourceId = await dataSourceId(notion, databaseId);
+  const existing = await findRepoSourcePage(notion, sourceId, input.repoFullName, input.githubUrl);
+  const properties = repoSourceProperties(input);
+
+  if (existing) {
+    const page = await notion.pages.update({
+      page_id: existing.id,
+      properties,
+    } as unknown as Parameters<typeof notion.pages.update>[0]);
+    await updateRepoSourceHubPage(notion, page as CreatePageResponseLike);
+    await ensureHubIntroBlocks(notion, String(existing.id), input.repoFullName, input.githubUrl);
+    return page as CreatePageResponseLike;
+  }
+
+  const page = (await notion.pages.create({
+    parent: { data_source_id: sourceId },
+    properties,
+    children: markdownToBlocks(repoHubMarkdown(input.repoFullName, input.githubUrl)),
+  } as unknown as Parameters<typeof notion.pages.create>[0])) as CreatePageResponseLike;
+  await updateRepoSourceHubPage(notion, page);
+  return page;
+}
+
+type CreatePageResponseLike = {
+  id: string;
+  url?: string;
+};
+
+async function createHubPage(
+  notion: Client,
+  parentPageId: string,
+  repoFullName: string,
+  githubUrl: string,
+): Promise<CreatePageResponseLike> {
+  return (await notion.pages.create({
+    parent: { page_id: normalizeNotionId(parentPageId) },
+    properties: {
+      title: titleProperty(`${repoFullName} Repo Knowledge Hub`),
+    },
+    children: markdownToBlocks(repoHubMarkdown(repoFullName, githubUrl)),
+  } as unknown as Parameters<typeof notion.pages.create>[0])) as CreatePageResponseLike;
+}
+
+async function findRepoSourcePage(
+  notion: Client,
+  dataSourceIdValue: string,
+  repoFullName: string,
+  githubUrl: string,
+): Promise<Record<string, unknown> | null> {
+  const response = (await notion.dataSources.query({
+    data_source_id: dataSourceIdValue,
+    filter: {
+      or: [
+        { property: "Repo", rich_text: { equals: repoFullName } },
+        { property: "GitHub URL", url: { equals: githubUrl } },
+      ],
+    },
+    page_size: 1,
+  } as unknown as Parameters<typeof notion.dataSources.query>[0])) as { results: Array<Record<string, unknown>> };
+
+  return response.results.find((page) => !page.archived && !page.in_trash) ?? null;
+}
+
+async function ensureHubIntroBlocks(
+  notion: Client,
+  pageId: string,
+  repoFullName: string,
+  githubUrl: string,
+): Promise<void> {
+  const children = await notion.blocks.children.list({
+    block_id: pageId,
+    page_size: 10,
+  });
+
+  if (children.results.length > 0) {
+    return;
+  }
+
+  await notion.blocks.children.append({
+    block_id: pageId,
+    children: markdownToBlocks(repoHubMarkdown(repoFullName, githubUrl)),
+  } as unknown as Parameters<typeof notion.blocks.children.append>[0]);
+}
+
+async function updateRepoSourceHubPage(
+  notion: Client,
+  page: CreatePageResponseLike,
+): Promise<void> {
+  if (!page.url) {
+    return;
+  }
+
+  await notion.pages.update({
+    page_id: page.id,
+    properties: {
+      "Hub Page": urlProperty(page.url),
+    },
+  } as unknown as Parameters<typeof notion.pages.update>[0]);
+}
+
+function repoSourceProperties(input: {
+  repoFullName: string;
+  githubUrl: string;
+  defaultBranch?: string;
+  importRunId?: string;
+}) {
+  const [owner] = input.repoFullName.split("/");
+  return {
+    Name: titleProperty(input.repoFullName),
+    Repo: richTextProperty(input.repoFullName),
+    Owner: richTextProperty(owner ?? ""),
+    "GitHub URL": urlProperty(input.githubUrl),
+    "Default Branch": richTextProperty(input.defaultBranch ?? ""),
+    "Latest Import Run": richTextProperty(input.importRunId ?? ""),
+    Status: selectProperty("Imported"),
+    Notes: richTextProperty("Managed by NBrain."),
+  };
+}
+
+function repoHubMarkdown(repoFullName: string, githubUrl: string): string {
+  return [
+    `# ${repoFullName} Repo Guide`,
+    "",
+    `GitHub: ${githubUrl}`,
+    "",
+    "NBrain manages the linked Repo Guide pages, Claims & Evidence, and Review Queue for this prototype.",
+  ].join("\n");
 }
 
 async function ensureRichTextProperty(
@@ -452,6 +610,10 @@ function selectProperty(name: string) {
 
 function urlProperty(url: string | undefined) {
   return url ? { url } : { url: null };
+}
+
+function relationProperty(pageId: string) {
+  return { relation: [{ id: pageId }] };
 }
 
 function markdownToBlocks(markdown: string): Array<Record<string, unknown>> {

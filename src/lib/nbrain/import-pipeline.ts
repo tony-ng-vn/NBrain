@@ -74,6 +74,8 @@ export async function runImportPipeline(
       parentPageId: notionParentPageId,
       repoFullName: parsedRepo.fullName,
       githubUrl: parsedRepo.githubUrl,
+      defaultBranch: repoSource.defaultBranch,
+      importRunId: runId,
     });
 
     updateImportRun(runId, {
