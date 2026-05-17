@@ -9,6 +9,19 @@ export function stableStringify(value: unknown): string {
   return JSON.stringify(sortObject(value));
 }
 
+export function notionRenderedHash(markdown: string): string {
+  return stableHash(notionComparableTextFromMarkdown(markdown));
+}
+
+export function notionComparableTextFromMarkdown(markdown: string): string {
+  return markdown
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .map((line) => line.replace(/^#{1,6}\s+/, "").replace(/^-\s+/, ""))
+    .join("\n");
+}
+
 function sortObject(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(sortObject);

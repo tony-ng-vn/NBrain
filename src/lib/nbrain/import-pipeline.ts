@@ -3,7 +3,7 @@ import { fallbackClaimsFromMarkdown } from "./claims";
 import { readDeepWikiRepoGuide, type DeepWikiSection } from "./deepwiki";
 import { fetchRepoSource } from "./github-api";
 import { parseGitHubRepoUrl } from "./github";
-import { stableHash } from "./hash";
+import { notionRenderedHash, stableHash } from "./hash";
 import { createNotionAdapter, type NotionPort, type NotionWorkspace } from "./notion";
 import { extractClaimsForSection } from "./openai";
 import {
@@ -143,7 +143,7 @@ async function createManagedSections(args: {
       sourceMarkdown: deepWikiSection.markdown,
       sourceMarkdownHash: stableHash(deepWikiSection.markdown),
       renderedMarkdown,
-      renderedNotionHash: stableHash(renderedMarkdown),
+      renderedNotionHash: notionRenderedHash(renderedMarkdown),
       claimIds: sectionClaims.map((claim) => claim.id),
       notionPageId: sectionPage.pageId,
       notionUrl: sectionPage.url,

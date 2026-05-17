@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Client } from "@notionhq/client";
-import { stableHash } from "./hash";
+import { notionRenderedHash, stableHash } from "./hash";
 import type { DocClaim, DocSection, MergedPrEvent } from "./schemas";
 import type { DocUpdateRun, NotionDatabaseLinks, ReviewTask } from "./run-store";
 
@@ -61,6 +61,15 @@ export type NotionPort = {
 };
 
 let notionClient: Client | undefined;
+const dataSourceIdCache = new Map<string, string>();
+
+const DATABASE_ENV = {
+  docSections: "NBRAIN_DOC_SECTIONS_DATABASE_ID",
+  docClaims: "NBRAIN_DOC_CLAIMS_DATABASE_ID",
+  mergedPrs: "NBRAIN_MERGED_PRS_DATABASE_ID",
+  docUpdateRuns: "NBRAIN_DOC_UPDATE_RUNS_DATABASE_ID",
+  reviewQueue: "NBRAIN_REVIEW_QUEUE_DATABASE_ID",
+} as const;
 
 export function getNotionClient(): Client {
   const token = process.env.NOTION_TOKEN;
@@ -78,7 +87,7 @@ export function createNotionAdapter(): NotionPort {
     async createWorkspace({ parentPageId, repoFullName, githubUrl }) {
       const notion = getNotionClient();
       const hub = await notion.pages.create({
-        parent: { page_id: parentPageId },
+        parent: { page_id: normalizeNotionId(parentPageId) },
         properties: {
           title: titleProperty(`${repoFullName} Repo Knowledge Hub`),
         },
@@ -95,52 +104,65 @@ export function createNotionAdapter(): NotionPort {
 
       const hubPageId = hub.id;
       const hubUrl = "url" in hub ? hub.url : undefined;
+      const configuredDatabases = configuredDatabaseLinks();
 
-      const databases = {
+      const databases = configuredDatabases ?? {
         docSections: await createDatabase(notion, hubPageId, "Doc Sections", {
           Name: { title: {} },
           Repo: { rich_text: {} },
-          "Source Hash": { rich_text: {} },
-          "Rendered Hash": { rich_text: {} },
+          "Section ID": { rich_text: {} },
+          "Notion Page": { url: {} },
+          "Source Markdown Hash": { rich_text: {} },
+          "Rendered Notion Hash": { rich_text: {} },
           "Claim IDs": { rich_text: {} },
-          "Section Page": { url: {} },
-          "Section Page ID": { rich_text: {} },
-          "Source Snapshot": { rich_text: {} },
+          Status: { select: {} },
+          "Last Updated By": { select: {} },
         }),
         docClaims: await createDatabase(notion, hubPageId, "Doc Claims", {
           Claim: { title: {} },
+          "Claim ID": { rich_text: {} },
           Kind: { select: {} },
           Status: { select: {} },
           "Section ID": { rich_text: {} },
           "Covered Paths": { rich_text: {} },
           Concepts: { rich_text: {} },
-          Evidence: { rich_text: {} },
+          "Evidence Refs": { rich_text: {} },
           Confidence: { number: { format: "percent" } },
         }),
         mergedPrs: await createDatabase(notion, hubPageId, "Merged PRs", {
-          Title: { title: {} },
+          Name: { title: {} },
+          Repo: { rich_text: {} },
           "PR Number": { number: {} },
-          URL: { url: {} },
+          "PR URL": { url: {} },
           "Base Branch": { rich_text: {} },
           "Merge Commit": { rich_text: {} },
           "Changed Files": { rich_text: {} },
+          Status: { select: {} },
+          "Impacted Claim IDs": { rich_text: {} },
+          "Impacted Section IDs": { rich_text: {} },
+          "Agent Summary": { rich_text: {} },
+          Error: { rich_text: {} },
         }),
         docUpdateRuns: await createDatabase(notion, hubPageId, "Doc Update Runs", {
           Name: { title: {} },
+          "Run ID": { rich_text: {} },
           Status: { select: {} },
           "PR Number": { number: {} },
-          Summary: { rich_text: {} },
-          "Impacted Claims": { rich_text: {} },
+          "Proposed Operations": { rich_text: {} },
+          "Applied Section IDs": { rich_text: {} },
+          "Review Task IDs": { rich_text: {} },
+          Logs: { rich_text: {} },
         }),
         reviewQueue: await createDatabase(notion, hubPageId, "Review Queue", {
           Title: { title: {} },
           Status: { select: {} },
           Reason: { rich_text: {} },
+          "Unresolved Question": { rich_text: {} },
           "PR URL": { url: {} },
           "Changed Files": { rich_text: {} },
-          "Affected Claims": { rich_text: {} },
-          Evidence: { rich_text: {} },
-          Question: { rich_text: {} },
+          "Affected Claim IDs": { rich_text: {} },
+          "Evidence Refs": { rich_text: {} },
+          "Suggested Next Step": { rich_text: {} },
         }),
       };
 
@@ -172,31 +194,33 @@ export function createNotionAdapter(): NotionPort {
 
       for (const section of sections) {
         await notion.pages.create({
-          parent: { database_id: workspace.databases.docSections },
+          parent: { data_source_id: await dataSourceId(notion, workspace.databases.docSections) },
           properties: {
             Name: titleProperty(section.title),
             Repo: richTextProperty(section.repoFullName),
-            "Source Hash": richTextProperty(section.sourceMarkdownHash),
-            "Rendered Hash": richTextProperty(section.renderedNotionHash),
+            "Section ID": richTextProperty(section.id),
+            "Notion Page": urlProperty(section.notionUrl),
+            "Source Markdown Hash": richTextProperty(section.sourceMarkdownHash),
+            "Rendered Notion Hash": richTextProperty(section.renderedNotionHash),
             "Claim IDs": richTextProperty(section.claimIds.join(", ")),
-            "Section Page": urlProperty(section.notionUrl),
-            "Section Page ID": richTextProperty(section.notionPageId ?? ""),
-            "Source Snapshot": richTextProperty(JSON.stringify(section.sourceSnapshot).slice(0, 1900)),
+            Status: selectProperty("Managed"),
+            "Last Updated By": selectProperty("NBrain"),
           },
         } as unknown as Parameters<typeof notion.pages.create>[0]);
       }
 
       for (const claim of claims) {
         await notion.pages.create({
-          parent: { database_id: workspace.databases.docClaims },
+          parent: { data_source_id: await dataSourceId(notion, workspace.databases.docClaims) },
           properties: {
             Claim: titleProperty(claim.text),
+            "Claim ID": richTextProperty(claim.id),
             Kind: selectProperty(claim.kind),
             Status: selectProperty(claim.staleStatus),
             "Section ID": richTextProperty(claim.sectionId),
             "Covered Paths": richTextProperty(claim.coveredPaths.join("\n")),
             Concepts: richTextProperty(claim.concepts.join(", ")),
-            Evidence: richTextProperty(claim.evidenceRefs.join("\n")),
+            "Evidence Refs": richTextProperty(claim.evidenceRefs.join("\n")),
             Confidence: { number: claim.confidence },
           },
         } as unknown as Parameters<typeof notion.pages.create>[0]);
@@ -206,14 +230,16 @@ export function createNotionAdapter(): NotionPort {
     async recordMergedPr({ workspace, event }) {
       const notion = getNotionClient();
       await notion.pages.create({
-        parent: { database_id: workspace.databases.mergedPrs },
+        parent: { data_source_id: await dataSourceId(notion, workspace.databases.mergedPrs) },
         properties: {
-          Title: titleProperty(event.title),
+          Name: titleProperty(`PR #${event.number}: ${event.title}`),
+          Repo: richTextProperty(`${event.repo.owner}/${event.repo.repo}`),
           "PR Number": { number: event.number },
-          URL: urlProperty(event.htmlUrl),
+          "PR URL": urlProperty(event.htmlUrl),
           "Base Branch": richTextProperty(event.baseBranch),
           "Merge Commit": richTextProperty(event.mergeCommitSha ?? ""),
           "Changed Files": richTextProperty(event.changedFiles.join("\n")),
+          Status: selectProperty("Recorded"),
         },
       } as unknown as Parameters<typeof notion.pages.create>[0]);
     },
@@ -221,13 +247,16 @@ export function createNotionAdapter(): NotionPort {
     async recordDocUpdateRun({ workspace, run }) {
       const notion = getNotionClient();
       await notion.pages.create({
-        parent: { database_id: workspace.databases.docUpdateRuns },
+        parent: { data_source_id: await dataSourceId(notion, workspace.databases.docUpdateRuns) },
         properties: {
           Name: titleProperty(`Doc update ${run.id.slice(0, 8)}`),
+          "Run ID": richTextProperty(run.id),
           Status: selectProperty(run.status),
           "PR Number": run.event ? { number: run.event.number } : undefined,
-          Summary: richTextProperty(run.logs.at(-1) ?? ""),
-          "Impacted Claims": richTextProperty(run.impactedClaimIds.join(", ")),
+          "Proposed Operations": richTextProperty(""),
+          "Applied Section IDs": richTextProperty(run.appliedSectionIds.join(", ")),
+          "Review Task IDs": richTextProperty(run.reviewTasks.map((task) => task.id).join(", ")),
+          Logs: richTextProperty(run.logs.join("\n")),
         },
       } as unknown as Parameters<typeof notion.pages.create>[0]);
     },
@@ -235,16 +264,17 @@ export function createNotionAdapter(): NotionPort {
     async createReviewTask({ workspace, task }) {
       const notion = getNotionClient();
       const page = await notion.pages.create({
-        parent: { database_id: workspace.databases.reviewQueue },
+        parent: { data_source_id: await dataSourceId(notion, workspace.databases.reviewQueue) },
         properties: {
           Title: titleProperty(task.title),
-          Status: selectProperty("open"),
+          Status: selectProperty("Open"),
           Reason: richTextProperty(task.reason),
+          "Unresolved Question": richTextProperty(task.unresolvedQuestion),
           "PR URL": urlProperty(task.prUrl),
           "Changed Files": richTextProperty(task.changedFiles.join("\n")),
-          "Affected Claims": richTextProperty(task.affectedClaimIds.join(", ")),
-          Evidence: richTextProperty(task.evidenceRefs.join("\n")),
-          Question: richTextProperty(task.unresolvedQuestion),
+          "Affected Claim IDs": richTextProperty(task.affectedClaimIds.join(", ")),
+          "Evidence Refs": richTextProperty(task.evidenceRefs.join("\n")),
+          "Suggested Next Step": richTextProperty("Inspect the PR and update the Repo Guide manually if needed."),
         },
       } as unknown as Parameters<typeof notion.pages.create>[0]);
 
@@ -277,7 +307,7 @@ export function createNotionAdapter(): NotionPort {
 
     async replaceSectionContent(section, markdown) {
       if (!section.notionPageId) {
-        return stableHash(markdown);
+        return notionRenderedHash(markdown);
       }
 
       const notion = getNotionClient();
@@ -297,9 +327,53 @@ export function createNotionAdapter(): NotionPort {
         children: markdownToBlocks(markdown),
       } as unknown as Parameters<typeof notion.blocks.children.append>[0]);
 
-      return stableHash(markdownToPlainText(markdown));
+      return notionRenderedHash(markdown);
     },
   };
+}
+
+function configuredDatabaseLinks(): RequiredNotionDatabaseLinks | null {
+  const links = Object.fromEntries(
+    Object.entries(DATABASE_ENV).map(([key, envKey]) => [key, process.env[envKey]]),
+  ) as Record<keyof RequiredNotionDatabaseLinks, string | undefined>;
+
+  if (
+    !links.docSections ||
+    !links.docClaims ||
+    !links.mergedPrs ||
+    !links.docUpdateRuns ||
+    !links.reviewQueue
+  ) {
+    return null;
+  }
+
+  return {
+    docSections: normalizeNotionId(links.docSections),
+    docClaims: normalizeNotionId(links.docClaims),
+    mergedPrs: normalizeNotionId(links.mergedPrs),
+    docUpdateRuns: normalizeNotionId(links.docUpdateRuns),
+    reviewQueue: normalizeNotionId(links.reviewQueue),
+  };
+}
+
+async function dataSourceId(notion: Client, databaseId: string): Promise<string> {
+  const normalizedDatabaseId = normalizeNotionId(databaseId);
+  const cached = dataSourceIdCache.get(normalizedDatabaseId);
+  if (cached) return cached;
+
+  const database = (await notion.databases.retrieve({
+    database_id: normalizedDatabaseId,
+  } as unknown as Parameters<typeof notion.databases.retrieve>[0])) as Record<string, unknown>;
+  const sources = Array.isArray(database.data_sources) ? database.data_sources : [];
+  const firstSource = sources[0] as Record<string, unknown> | undefined;
+  const id = typeof firstSource?.id === "string" ? firstSource.id : "";
+
+  if (!id) {
+    throw new Error(`No data source found for Notion database ${normalizedDatabaseId}.`);
+  }
+
+  dataSourceIdCache.set(normalizedDatabaseId, id);
+  return id;
 }
 
 async function createDatabase(
@@ -315,6 +389,11 @@ async function createDatabase(
   } as unknown as Parameters<typeof notion.databases.create>[0]);
 
   return database.id;
+}
+
+function normalizeNotionId(value: string): string {
+  const match = value.match(/[0-9a-fA-F]{32}/);
+  return match ? match[0] : value;
 }
 
 function titleProperty(content: string) {
