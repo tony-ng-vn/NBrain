@@ -137,6 +137,8 @@ const DATABASES = {
 	docUpdateRuns: "NBRAIN_DOC_UPDATE_RUNS_DATABASE_ID",
 } as const;
 
+const dataSourceIdCache = new Map<string, string>();
+
 worker.webhook("githubPullRequestWebhook", {
 	title: "GitHub Pull Request Webhook",
 	description:
@@ -573,7 +575,7 @@ async function upsertMergedPr(
 	}
 
 	const page = await notion.pages.create({
-		parent: { database_id: dbId("mergedPrs") },
+		parent: { data_source_id: await dataSourceId(notion, "mergedPrs") },
 		properties: mergedPrProperties(event, { status, changedFiles }),
 	} as never);
 
@@ -658,9 +660,32 @@ async function queryDataSource(
 	args: Record<string, unknown>,
 ): Promise<{ results: unknown[]; has_more: boolean; next_cursor: string | null }> {
 	return notion.dataSources.query({
-		data_source_id: dbId(key),
+		data_source_id: await dataSourceId(notion, key),
 		...args,
 	} as never) as never;
+}
+
+async function dataSourceId(
+	notion: NotionClient,
+	key: keyof typeof DATABASES,
+): Promise<string> {
+	const databaseId = dbId(key);
+	const cached = dataSourceIdCache.get(databaseId);
+	if (cached) return cached;
+
+	const database = (await notion.databases.retrieve({
+		database_id: databaseId,
+	} as never)) as Record<string, unknown>;
+	const sources = Array.isArray(database.data_sources) ? database.data_sources : [];
+	const firstSource = asRecord(sources[0]);
+	const id = asString(firstSource?.id);
+
+	if (!id) {
+		throw new Error(`No data source found for ${DATABASES[key]}`);
+	}
+
+	dataSourceIdCache.set(databaseId, id);
+	return id;
 }
 
 function mergedPrFromPage(page: Record<string, unknown>): MergedPrRow {
@@ -991,7 +1016,7 @@ async function addClaim(
 	evidenceRefs: string[],
 ): Promise<void> {
 	await notion.pages.create({
-		parent: { database_id: dbId("docClaims") },
+		parent: { data_source_id: await dataSourceId(notion, "docClaims") },
 		properties: {
 			Claim: title(claim.text),
 			"Claim ID": richText(crypto.randomUUID()),
@@ -1024,7 +1049,7 @@ async function createReviewTask(
 	input: ReviewTaskInput,
 ): Promise<{ id: string; url: string }> {
 	const page = await notion.pages.create({
-		parent: { database_id: dbId("reviewQueue") },
+		parent: { data_source_id: await dataSourceId(notion, "reviewQueue") },
 		properties: {
 			Title: title(input.title),
 			Status: select("Open"),
@@ -1053,7 +1078,7 @@ async function recordDocUpdateRun(
 	},
 ): Promise<void> {
 	await notion.pages.create({
-		parent: { database_id: dbId("docUpdateRuns") },
+		parent: { data_source_id: await dataSourceId(notion, "docUpdateRuns") },
 		properties: {
 			Name: title(`Doc update ${new Date().toISOString()}`),
 			"Run ID": richText(crypto.randomUUID()),
