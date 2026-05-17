@@ -1,0 +1,22 @@
+{
+  "nbrain_fixture": "safe-update",
+  "nbrain_changed_files": ["README.md"],
+  "action": "closed",
+  "repository": {
+    "name": "demo",
+    "owner": {
+      "login": "acme"
+    }
+  },
+  "pull_request": {
+    "number": 7,
+    "title": "Clarify repo setup in README",
+    "body": "Documents the primary setup path.",
+    "merged": true,
+    "html_url": "https://github.com/acme/demo/pull/7",
+    "merge_commit_sha": "1111111111111111111111111111111111111111",
+    "base": {
+      "ref": "main"
+    }
+  }
+}

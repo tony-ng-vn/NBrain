@@ -1,0 +1,22 @@
+{
+  "nbrain_fixture": "review-task",
+  "nbrain_changed_files": ["docs/strategy/future-roadmap.md"],
+  "action": "closed",
+  "repository": {
+    "name": "demo",
+    "owner": {
+      "login": "acme"
+    }
+  },
+  "pull_request": {
+    "number": 8,
+    "title": "Explore possible future architecture",
+    "body": "Raises questions but does not change implementation files.",
+    "merged": true,
+    "html_url": "https://github.com/acme/demo/pull/8",
+    "merge_commit_sha": "2222222222222222222222222222222222222222",
+    "base": {
+      "ref": "main"
+    }
+  }
+}

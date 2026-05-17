@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { parseClaimExtractionResponse } from "@/lib/nbrain/claims";
 import { parseGitHubRepoUrl, parseMergedPrWebhookPayload } from "@/lib/nbrain/github";
+import { stableHash } from "@/lib/nbrain/hash";
 import { rankClaimsForPr } from "@/lib/nbrain/matcher";
+import type { NotionPort } from "@/lib/nbrain/notion";
+import { createImportRun, updateImportRun } from "@/lib/nbrain/run-store";
+import { runMergedPrUpdatePipeline } from "@/lib/nbrain/update-pipeline";
 import { verifyPatchProposal } from "@/lib/nbrain/verifier";
 import type { DocClaim, DocSection, MergedPrEvent } from "@/lib/nbrain/schemas";
+import safeFixture from "@/fixtures/safe-merged-pr.json";
+import reviewFixture from "@/fixtures/review-merged-pr.json";
 
 describe("parseGitHubRepoUrl", () => {
   it("accepts public GitHub repository URLs", () => {
@@ -212,6 +218,59 @@ describe("webhook payload filtering", () => {
   });
 });
 
+describe("replay fixtures", () => {
+  it("produces a Doc Update Run with one safe section update", async () => {
+    const importRun = seedCompletedImportRun();
+    const fakeNotion = createFakeNotion();
+    const parsed = parseMergedPrWebhookPayload(safeFixture);
+
+    if (parsed.ignored) {
+      throw new Error(parsed.reason);
+    }
+
+    const result = await runMergedPrUpdatePipeline(
+      {
+        importRunId: importRun.id,
+        event: parsed.event,
+      },
+      {
+        notion: fakeNotion,
+        fetchChangedFiles: async () => safeFixture.nbrain_changed_files,
+      },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.appliedSectionIds).toHaveLength(1);
+    expect(result.reviewTasks).toHaveLength(0);
+  });
+
+  it("produces a Doc Update Run with a review task when evidence is weak", async () => {
+    const importRun = seedCompletedImportRun();
+    const fakeNotion = createFakeNotion();
+    const parsed = parseMergedPrWebhookPayload(reviewFixture);
+
+    if (parsed.ignored) {
+      throw new Error(parsed.reason);
+    }
+
+    const result = await runMergedPrUpdatePipeline(
+      {
+        importRunId: importRun.id,
+        event: parsed.event,
+        weakEvidence: true,
+      },
+      {
+        notion: fakeNotion,
+        fetchChangedFiles: async () => reviewFixture.nbrain_changed_files,
+      },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.appliedSectionIds).toHaveLength(0);
+    expect(result.reviewTasks).toHaveLength(1);
+  });
+});
+
 function sectionFixture(overrides: Partial<DocSection> = {}): DocSection {
   return {
     id: "section-1",
@@ -268,6 +327,83 @@ function webhookPayload({
       base: {
         ref: baseRef,
       },
+    },
+  };
+}
+
+function seedCompletedImportRun() {
+  const run = createImportRun("https://github.com/acme/demo");
+  const section = sectionFixture({
+    notionPageId: "notion-section-1",
+    notionUrl: "https://notion.so/section-1",
+  });
+  const seededClaim = claim({
+    id: "claim-1",
+    sectionId: section.id,
+    coveredPaths: ["README.md"],
+    concepts: ["setup", "readme"],
+    evidenceRefs: ["README.md"],
+  });
+
+  return updateImportRun(run.id, {
+    status: "completed",
+    repo: {
+      owner: "acme",
+      repo: "demo",
+      githubUrl: "https://github.com/acme/demo",
+      defaultBranch: "main",
+      hubPageId: "notion-hub",
+      latestImportRunId: run.id,
+    },
+    hubPageId: "notion-hub",
+    hubUrl: "https://notion.so/hub",
+    databases: {
+      docSections: "db-sections",
+      docClaims: "db-claims",
+      mergedPrs: "db-prs",
+      docUpdateRuns: "db-runs",
+      reviewQueue: "db-review",
+    },
+    sections: [{ ...section, claimIds: [seededClaim.id] }],
+    claims: [seededClaim],
+  });
+}
+
+function createFakeNotion(): NotionPort {
+  return {
+    async createWorkspace() {
+      throw new Error("not used");
+    },
+    async createSectionPage() {
+      throw new Error("not used");
+    },
+    async persistSectionsAndClaims() {
+      throw new Error("not used");
+    },
+    async recordMergedPr() {
+      return undefined;
+    },
+    async recordDocUpdateRun() {
+      return undefined;
+    },
+    async createReviewTask({ task }) {
+      return {
+        id: "review-task",
+        title: task.title,
+        reason: task.reason,
+        unresolvedQuestion: task.unresolvedQuestion,
+        prUrl: task.prUrl,
+        changedFiles: task.changedFiles,
+        affectedClaimIds: task.affectedClaimIds,
+        evidenceRefs: task.evidenceRefs,
+        notionPageUrl: "https://notion.so/review-task",
+      };
+    },
+    async getRenderedHash(section) {
+      return section.renderedNotionHash;
+    },
+    async replaceSectionContent(_section, markdown) {
+      return stableHash(markdown);
     },
   };
 }
