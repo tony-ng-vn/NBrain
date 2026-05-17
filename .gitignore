@@ -4,3 +4,10 @@
 !docs/superpowers/specs/
 !docs/superpowers/specs/*.md
 *.idea/
+node_modules/
+.next/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
