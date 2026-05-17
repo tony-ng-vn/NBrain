@@ -486,26 +486,26 @@ async function upsertRepoSourcePage(
     return createHubPage(notion, input.parentPageId, input.repoFullName, input.githubUrl);
   }
 
-  const sourceId = await dataSourceId(notion, databaseId);
-  const existing = await findRepoSourcePage(notion, sourceId, input.repoFullName, input.githubUrl);
-  const properties = repoSourceProperties(input);
+  const schema = await ensureRepoSourceDataSourceProperties(notion, databaseId);
+  const existing = await findRepoSourcePage(notion, schema, input.repoFullName, input.githubUrl);
+  const properties = repoSourceProperties(input, schema);
 
   if (existing) {
     const page = await notion.pages.update({
       page_id: existing.id,
       properties,
     } as unknown as Parameters<typeof notion.pages.update>[0]);
-    await updateRepoSourceHubPage(notion, page as CreatePageResponseLike);
+    await updateRepoSourceHubPage(notion, page as CreatePageResponseLike, schema);
     await ensureHubIntroBlocks(notion, String(existing.id), input.repoFullName, input.githubUrl);
     return page as CreatePageResponseLike;
   }
 
   const page = (await notion.pages.create({
-    parent: { data_source_id: sourceId },
+    parent: { data_source_id: schema.sourceId },
     properties,
     children: markdownToBlocks(repoHubMarkdown(input.repoFullName, input.githubUrl)),
   } as unknown as Parameters<typeof notion.pages.create>[0])) as CreatePageResponseLike;
-  await updateRepoSourceHubPage(notion, page);
+  await updateRepoSourceHubPage(notion, page, schema);
   return page;
 }
 
@@ -513,6 +513,60 @@ type CreatePageResponseLike = {
   id: string;
   url?: string;
 };
+
+type RepoSourceDataSourceSchema = {
+  sourceId: string;
+  titleProperty: string;
+  githubUrlProperty: string;
+  hubPageProperty: string;
+};
+
+async function ensureRepoSourceDataSourceProperties(
+  notion: Client,
+  databaseId: string,
+): Promise<RepoSourceDataSourceSchema> {
+  const sourceId = await dataSourceId(notion, databaseId);
+  const source = (await notion.dataSources.retrieve({
+    data_source_id: sourceId,
+  } as unknown as Parameters<typeof notion.dataSources.retrieve>[0])) as Record<string, unknown>;
+  const properties = (source.properties as Record<string, { type?: string }> | undefined) ?? {};
+  const titleProperty = propertyNameForType(properties, "title") ?? "Name";
+  const githubUrlProperty =
+    (properties["GitHub URL"]?.type === "url" && "GitHub URL") ||
+    (properties["GitHub Repo"]?.type === "url" && "GitHub Repo") ||
+    "GitHub URL";
+  const hubPageProperty = "Hub Page";
+  const missingProperties: Record<string, unknown> = {};
+
+  if (!properties[githubUrlProperty]) {
+    missingProperties[githubUrlProperty] = { type: "url", url: {} };
+  }
+  for (const property of ["Repo", "Owner", "Default Branch", "Latest Import Run", "Notes"]) {
+    if (!properties[property]) {
+      missingProperties[property] = { type: "rich_text", rich_text: {} };
+    }
+  }
+  if (!properties.Status) {
+    missingProperties.Status = { type: "select", select: {} };
+  }
+  if (!properties[hubPageProperty]) {
+    missingProperties[hubPageProperty] = { type: "url", url: {} };
+  }
+
+  if (Object.keys(missingProperties).length > 0) {
+    await notion.dataSources.update({
+      data_source_id: sourceId,
+      properties: missingProperties,
+    } as unknown as Parameters<typeof notion.dataSources.update>[0]);
+  }
+
+  return {
+    sourceId,
+    titleProperty,
+    githubUrlProperty,
+    hubPageProperty,
+  };
+}
 
 async function createHubPage(
   notion: Client,
@@ -531,16 +585,16 @@ async function createHubPage(
 
 async function findRepoSourcePage(
   notion: Client,
-  dataSourceIdValue: string,
+  schema: RepoSourceDataSourceSchema,
   repoFullName: string,
   githubUrl: string,
 ): Promise<Record<string, unknown> | null> {
   const response = (await notion.dataSources.query({
-    data_source_id: dataSourceIdValue,
+    data_source_id: schema.sourceId,
     filter: {
       or: [
         { property: "Repo", rich_text: { equals: repoFullName } },
-        { property: "GitHub URL", url: { equals: githubUrl } },
+        { property: schema.githubUrlProperty, url: { equals: githubUrl } },
       ],
     },
     page_size: 1,
@@ -573,6 +627,7 @@ async function ensureHubIntroBlocks(
 async function updateRepoSourceHubPage(
   notion: Client,
   page: CreatePageResponseLike,
+  schema: RepoSourceDataSourceSchema,
 ): Promise<void> {
   if (!page.url) {
     return;
@@ -581,7 +636,7 @@ async function updateRepoSourceHubPage(
   await notion.pages.update({
     page_id: page.id,
     properties: {
-      "Hub Page": urlProperty(page.url),
+      [schema.hubPageProperty]: urlProperty(page.url),
     },
   } as unknown as Parameters<typeof notion.pages.update>[0]);
 }
@@ -591,13 +646,13 @@ function repoSourceProperties(input: {
   githubUrl: string;
   defaultBranch?: string;
   importRunId?: string;
-}) {
+}, schema: RepoSourceDataSourceSchema) {
   const [owner] = input.repoFullName.split("/");
   return {
-    Name: titleProperty(input.repoFullName),
+    [schema.titleProperty]: titleProperty(input.repoFullName),
     Repo: richTextProperty(input.repoFullName),
     Owner: richTextProperty(owner ?? ""),
-    "GitHub URL": urlProperty(input.githubUrl),
+    [schema.githubUrlProperty]: urlProperty(input.githubUrl),
     "Default Branch": richTextProperty(input.defaultBranch ?? ""),
     "Latest Import Run": richTextProperty(input.importRunId ?? ""),
     Status: selectProperty("Imported"),
@@ -680,6 +735,13 @@ function urlProperty(url: string | undefined) {
 
 function relationProperty(pageId: string) {
   return { relation: [{ id: pageId }] };
+}
+
+function propertyNameForType(
+  properties: Record<string, { type?: string }>,
+  type: string,
+): string | undefined {
+  return Object.entries(properties).find(([, property]) => property.type === type)?.[0];
 }
 
 function propertyUrl(page: Record<string, unknown>, propertyName: string): string | undefined {
