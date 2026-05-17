@@ -23,7 +23,6 @@ export async function readDeepWikiRepoGuide(repoFullName: string): Promise<DeepW
 
       const sections = splitMarkdownSections(contents, repoFullName)
         .filter(hasUsefulWikiContent)
-        .slice(0, 5)
         .map((section) => ({
           ...section,
           sourceSnapshot: {
@@ -101,11 +100,13 @@ function splitMarkdownSections(markdown: string, repoFullName: string): DeepWiki
     return [];
   }
 
-  const chunks = normalized.split(/\n(?=#{1,2}\s+)/g).filter(Boolean);
+  const pageChunks = normalized.split(/\n(?=# Page:\s+)/g).filter(Boolean);
+  const chunks = pageChunks.length > 1 ? pageChunks : normalized.split(/\n(?=#{1,2}\s+)/g).filter(Boolean);
   const selected = chunks.length > 1 ? chunks : [normalized];
 
   return selected.map((chunk, index) => {
     const title =
+      chunk.match(/^# Page:\s+(.+)$/m)?.[1]?.trim() ??
       chunk.match(/^#{1,2}\s+(.+)$/m)?.[1]?.trim() ??
       ["Repo Guide", "Architecture", "Usage", "Data Flow", "Operational Notes"][index] ??
       `Section ${index + 1}`;

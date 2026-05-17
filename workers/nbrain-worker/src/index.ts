@@ -896,18 +896,14 @@ async function autoApplyDirectEvidenceUpdate(
 		}
 
 		const markdown = [
-			`# ${section.title}`,
-			"",
-			`Repository: ${repoFullName}`,
+			"---",
 			"",
 			"## Latest Verified Change",
 			"",
 			`Merged PR #${event.number} (${event.title}) changed ${changedFiles.join(", ")}.`,
-			"",
-			"Managed by NBrain. If this page is manually edited, NBrain will create a Review Queue task before overwriting it.",
 		].join("\n");
 
-		await replaceSectionPage(notion, section, markdown);
+		await appendSectionPageUpdate(notion, section, markdown);
 		await recordDocUpdateRun(notion, {
 			prNumber: event.number,
 			status: "Applied",
@@ -915,23 +911,46 @@ async function autoApplyDirectEvidenceUpdate(
 				summary: `Auto-applied direct evidence update for PR #${event.number}.`,
 				operations: [
 					{
-						type: "replace_section",
+						type: "append_verified_change",
 						sectionId: section.id,
-						expectedRenderedHash: section.renderedNotionHash,
 						evidenceRefs: changedFiles,
-						removedClaimIds: [],
 					},
 				],
 			}),
 			appliedSectionIds: [section.id],
 			reviewTaskIds: [],
-			logs: ["Auto-applied direct changed-file evidence in webhook."],
+			logs: ["Auto-appended direct changed-file evidence in webhook."],
 		});
 
 		return { applied: true };
 	}
 
 	return { applied: false, reason: skippedReason };
+}
+
+async function appendSectionPageUpdate(
+	notion: NotionClient,
+	section: DocSection,
+	markdown: string,
+): Promise<void> {
+	const pageId = notionIdFromUrl(section.notionPageUrl);
+	if (!pageId) {
+		throw new Error(`Could not parse Notion page ID for section ${section.id}`);
+	}
+
+	await notion.blocks.children.append({
+		block_id: pageId,
+		children: markdownToBlocks(markdown),
+	} as never);
+
+	await notion.pages.update({
+		page_id: section.pageId,
+		properties: {
+			"Rendered Notion Hash": richText(stableHash(`${section.renderedNotionHash}\n${markdown}`)),
+			Status: select("Managed"),
+			"Last Updated By": select("NBrain"),
+		},
+	} as never);
 }
 
 async function sectionPageIsEditable(notion: NotionClient, section: DocSection): Promise<boolean> {

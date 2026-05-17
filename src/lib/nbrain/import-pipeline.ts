@@ -128,7 +128,7 @@ async function createManagedSections(args: {
   const sections: DocSection[] = [];
   const claims: DocClaim[] = [];
 
-  for (const [index, deepWikiSection] of args.deepWikiSections.slice(0, 5).entries()) {
+  for (const [index, deepWikiSection] of args.deepWikiSections.entries()) {
     const sectionId = `section_${index + 1}_${randomUUID()}`;
     const renderedMarkdown = renderManagedSection(deepWikiSection);
     const sectionPage = await args.notion.createSectionPage({
