@@ -188,13 +188,18 @@ export function createNotionAdapter(): NotionPort {
 
     async createSectionPage({ hubPageId, title, markdown }) {
       const notion = getNotionClient();
+      const blocks = markdownToBlocks(markdown);
       const page = await notion.pages.create({
         parent: { page_id: hubPageId },
         properties: {
           title: titleProperty(title),
         },
-        children: markdownToBlocks(markdown),
+        children: blocks.slice(0, 100),
       } as unknown as Parameters<typeof notion.pages.create>[0]);
+
+      if (blocks.length > 100) {
+        await appendBlocksInBatches(notion, page.id, blocks.slice(100));
+      }
 
       return {
         pageId: page.id,
@@ -317,11 +322,8 @@ export function createNotionAdapter(): NotionPort {
       }
 
       const notion = getNotionClient();
-      const blocks = await notion.blocks.children.list({
-        block_id: section.notionPageId,
-        page_size: 100,
-      });
-      const text = blocks.results.map(extractPlainText).filter(Boolean).join("\n");
+      const blocks = await listAllChildBlocks(notion, section.notionPageId);
+      const text = blocks.map(extractPlainText).filter(Boolean).join("\n");
       return stableHash(text);
     },
 
@@ -331,25 +333,53 @@ export function createNotionAdapter(): NotionPort {
       }
 
       const notion = getNotionClient();
-      const blocks = await notion.blocks.children.list({
-        block_id: section.notionPageId,
-        page_size: 100,
-      });
+      const blocks = await listAllChildBlocks(notion, section.notionPageId);
 
-      for (const block of blocks.results) {
-        if ("id" in block) {
+      for (const block of blocks) {
+        if (typeof block.id === "string") {
           await notion.blocks.delete({ block_id: block.id });
         }
       }
 
-      await notion.blocks.children.append({
-        block_id: section.notionPageId,
-        children: markdownToBlocks(markdown),
-      } as unknown as Parameters<typeof notion.blocks.children.append>[0]);
+      await appendBlocksInBatches(notion, section.notionPageId, markdownToBlocks(markdown));
 
       return notionRenderedHash(markdown);
     },
   };
+}
+
+async function appendBlocksInBatches(
+  notion: Client,
+  blockId: string,
+  blocks: Array<Record<string, unknown>>,
+): Promise<void> {
+  for (let index = 0; index < blocks.length; index += 100) {
+    await notion.blocks.children.append({
+      block_id: blockId,
+      children: blocks.slice(index, index + 100),
+    } as unknown as Parameters<typeof notion.blocks.children.append>[0]);
+  }
+}
+
+async function listAllChildBlocks(notion: Client, blockId: string): Promise<Array<Record<string, unknown>>> {
+  const blocks: Array<Record<string, unknown>> = [];
+  let cursor: string | undefined;
+
+  do {
+    const response = (await notion.blocks.children.list({
+      block_id: blockId,
+      page_size: 100,
+      start_cursor: cursor,
+    } as unknown as Parameters<typeof notion.blocks.children.list>[0])) as {
+      results: Array<Record<string, unknown>>;
+      next_cursor?: string | null;
+    };
+
+    blocks.push(...response.results);
+    cursor = response.next_cursor ?? undefined;
+  } while (cursor);
+
+  return blocks;
 }
 
 function configuredDatabaseLinks(): RequiredNotionDatabaseLinks | null {
@@ -758,10 +788,6 @@ function markdownToBlocks(markdown: string): Array<Record<string, unknown>> {
   for (const rawLine of lines) {
     const line = rawLine.trim();
 
-    if (blocks.length >= 90) {
-      break;
-    }
-
     if (line.startsWith("```")) {
       if (codeLines) {
         blocks.push(codeBlock(codeLines.join("\n")));
@@ -824,7 +850,7 @@ function markdownToBlocks(markdown: string): Array<Record<string, unknown>> {
     });
   }
 
-  if (codeLines && blocks.length < 90) {
+  if (codeLines) {
     blocks.push(codeBlock(codeLines.join("\n")));
   }
 

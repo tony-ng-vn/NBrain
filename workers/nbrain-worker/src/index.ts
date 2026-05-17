@@ -927,10 +927,7 @@ async function appendSectionPageUpdate(
 		throw new Error(`Could not parse Notion page ID for section ${section.id}`);
 	}
 
-	await notion.blocks.children.append({
-		block_id: pageId,
-		children: markdownToBlocks(markdown),
-	} as never);
+	await appendBlocksInBatches(notion, pageId, markdownToBlocks(markdown));
 
 	await notion.pages.update({
 		page_id: section.pageId,
@@ -1042,21 +1039,15 @@ async function replaceSectionPage(
 		throw new Error(`Could not parse Notion page ID for section ${section.id}`);
 	}
 
-	const children = await notion.blocks.children.list({
-		block_id: pageId,
-		page_size: 100,
-	} as never);
+	const children = await listAllChildBlocks(notion, pageId);
 
-	for (const block of children.results as Array<{ id?: string }>) {
+	for (const block of children) {
 		if (block.id) {
 			await notion.blocks.delete({ block_id: block.id } as never);
 		}
 	}
 
-	await notion.blocks.children.append({
-		block_id: pageId,
-		children: markdownToBlocks(markdown),
-	} as never);
+	await appendBlocksInBatches(notion, pageId, markdownToBlocks(markdown));
 
 	await notion.pages.update({
 		page_id: section.pageId,
@@ -1265,10 +1256,46 @@ function splitMultiValue(value: string): string[] {
 	);
 }
 
+async function appendBlocksInBatches(
+	notion: NotionClient,
+	blockId: string,
+	blocks: Array<Record<string, unknown>>,
+): Promise<void> {
+	for (let index = 0; index < blocks.length; index += 100) {
+		await notion.blocks.children.append({
+			block_id: blockId,
+			children: blocks.slice(index, index + 100),
+		} as never);
+	}
+}
+
+async function listAllChildBlocks(
+	notion: NotionClient,
+	blockId: string,
+): Promise<Array<{ id?: string } & Record<string, unknown>>> {
+	const blocks: Array<{ id?: string } & Record<string, unknown>> = [];
+	let cursor: string | undefined;
+
+	do {
+		const response = (await notion.blocks.children.list({
+			block_id: blockId,
+			page_size: 100,
+			start_cursor: cursor,
+		} as never)) as {
+			results: Array<{ id?: string } & Record<string, unknown>>;
+			next_cursor?: string | null;
+		};
+
+		blocks.push(...response.results);
+		cursor = response.next_cursor ?? undefined;
+	} while (cursor);
+
+	return blocks;
+}
+
 function markdownToBlocks(markdown: string): Array<Record<string, unknown>> {
 	return markdown
 		.split("\n")
-		.slice(0, 24)
 		.map((line) => line.trimEnd())
 		.filter((line, index, lines) => line.length > 0 || index === lines.length - 1)
 		.map((line) => {
