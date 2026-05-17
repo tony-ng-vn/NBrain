@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { fallbackClaimsFromMarkdown } from "./claims";
 import { readDeepWikiRepoGuide, type DeepWikiSection } from "./deepwiki";
-import { fetchRepoSource } from "./github-api";
+import { fetchRepoSource, readGitHubRepoGuide } from "./github-api";
 import { parseGitHubRepoUrl } from "./github";
 import { notionRenderedHash, stableHash } from "./hash";
 import { createNotionAdapter, type NotionPort, type NotionWorkspace } from "./notion";
@@ -56,9 +56,17 @@ export async function runImportPipeline(
     });
 
     const readDeepWiki = deps.readDeepWiki ?? readDeepWikiRepoGuide;
-    const deepWikiSections = await readDeepWiki(parsedRepo.fullName);
+    let deepWikiSections = await readDeepWiki(parsedRepo.fullName);
+    let bootstrapSource = "DeepWiki";
+    if (!deps.readDeepWiki && deepWikiUnavailable(deepWikiSections)) {
+      deepWikiSections = await readGitHubRepoGuide(parsedRepo);
+      bootstrapSource = "GitHub README/reference fallback";
+      updateImportRun(runId, {
+        log: "DeepWiki did not return usable repo docs, so NBrain imported GitHub README/reference content.",
+      });
+    }
     updateImportRun(runId, {
-      log: `Imported ${deepWikiSections.length} DeepWiki section(s).`,
+      log: `Imported ${deepWikiSections.length} ${bootstrapSource} section(s).`,
     });
 
     const notion = deps.notion ?? createNotionAdapter();
@@ -162,4 +170,24 @@ function renderManagedSection(section: DeepWikiSection): string {
     "",
     "Managed by NBrain. If this page is manually edited, NBrain will create a Review Queue task before overwriting it.",
   ].join("\n");
+}
+
+function deepWikiUnavailable(sections: DeepWikiSection[]): boolean {
+  if (sections.length === 0) {
+    return true;
+  }
+
+  const unavailablePatterns = [
+    "not indexed",
+    "repository not found",
+    "repo not found",
+    "could not fetch",
+    "unable to fetch",
+    "not available",
+  ];
+
+  return sections.every((section) => {
+    const markdown = section.markdown.toLowerCase();
+    return unavailablePatterns.some((pattern) => markdown.includes(pattern));
+  });
 }
