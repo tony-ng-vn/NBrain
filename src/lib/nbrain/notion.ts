@@ -204,6 +204,11 @@ export function createNotionAdapter(): NotionPort {
 
     async persistSectionsAndClaims({ workspace, sections, claims }) {
       const notion = getNotionClient();
+      const repoFullName = sections[0]?.repoFullName;
+
+      if (repoFullName) {
+        await archivePreviousRepoGraph(notion, workspace.databases, repoFullName);
+      }
 
       for (const section of sections) {
         await notion.pages.create({
@@ -403,6 +408,67 @@ async function ensureNBrainDataSourceProperties(
     ensureRichTextProperty(notion, databases.docSections, "Repo Key"),
     ensureRichTextProperty(notion, databases.docClaims, "Repo Key"),
   ]);
+}
+
+async function archivePreviousRepoGraph(
+  notion: Client,
+  databases: RequiredNotionDatabaseLinks,
+  repoFullName: string,
+): Promise<void> {
+  await archivePagesForRepo(notion, databases.docClaims, repoFullName);
+  await archivePagesForRepo(notion, databases.docSections, repoFullName, async (page) => {
+    const sectionPageUrl = propertyUrl(page, "Notion Page");
+    const sectionPageId = sectionPageUrl ? normalizeNotionId(sectionPageUrl) : "";
+    if (!sectionPageId) {
+      return;
+    }
+
+    try {
+      await notion.pages.update({
+        page_id: sectionPageId,
+        archived: true,
+      } as unknown as Parameters<typeof notion.pages.update>[0]);
+    } catch {
+      // The managed section page may already be deleted or inaccessible. Archiving
+      // the index row is still enough to keep future worker matches scoped.
+    }
+  });
+}
+
+async function archivePagesForRepo(
+  notion: Client,
+  databaseId: string,
+  repoFullName: string,
+  beforeArchive?: (page: Record<string, unknown>) => Promise<void>,
+): Promise<void> {
+  const sourceId = await dataSourceId(notion, databaseId);
+  let cursor: string | undefined;
+
+  do {
+    const response = (await notion.dataSources.query({
+      data_source_id: sourceId,
+      filter: { property: "Repo Key", rich_text: { equals: repoFullName } },
+      start_cursor: cursor,
+      page_size: 100,
+    } as unknown as Parameters<typeof notion.dataSources.query>[0])) as {
+      results: Array<Record<string, unknown>>;
+      next_cursor?: string | null;
+    };
+
+    for (const page of response.results) {
+      if (page.archived === true || page.in_trash === true || typeof page.id !== "string") {
+        continue;
+      }
+
+      await beforeArchive?.(page);
+      await notion.pages.update({
+        page_id: page.id,
+        archived: true,
+      } as unknown as Parameters<typeof notion.pages.update>[0]);
+    }
+
+    cursor = response.next_cursor ?? undefined;
+  } while (cursor);
 }
 
 async function upsertRepoSourcePage(
@@ -614,6 +680,12 @@ function urlProperty(url: string | undefined) {
 
 function relationProperty(pageId: string) {
   return { relation: [{ id: pageId }] };
+}
+
+function propertyUrl(page: Record<string, unknown>, propertyName: string): string | undefined {
+  const properties = page.properties as Record<string, unknown> | undefined;
+  const property = properties?.[propertyName] as Record<string, unknown> | undefined;
+  return typeof property?.url === "string" ? property.url : undefined;
 }
 
 function markdownToBlocks(markdown: string): Array<Record<string, unknown>> {

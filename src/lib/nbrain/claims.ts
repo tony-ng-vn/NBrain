@@ -29,6 +29,7 @@ export function materializeClaims(
 
 export function fallbackClaimsFromMarkdown(sectionId: string, markdown: string): DocClaim[] {
   const title = markdown.match(/^#\s+(.+)$/m)?.[1] ?? "Repo Guide";
+  const coveredPaths = extractReferencePaths(markdown);
   const concepts = Array.from(
     new Set(
       markdown
@@ -45,12 +46,33 @@ export function fallbackClaimsFromMarkdown(sectionId: string, markdown: string):
       sectionId,
       text: `${title} describes the repository behavior and primary implementation paths.`,
       kind: "concept",
-      coveredPaths: ["README.md"],
+      coveredPaths,
       concepts: concepts.length > 0 ? concepts : ["repository", "guide"],
       dependencyClaimIds: [],
-      evidenceRefs: ["README.md"],
+      evidenceRefs: coveredPaths,
       confidence: 0.35,
       staleStatus: "fresh",
     },
   ];
+}
+
+function extractReferencePaths(markdown: string): string[] {
+  const matches = markdown.matchAll(
+    /(?:`([^`\n]+\.[A-Za-z0-9]+[^`\n]*)`)|\b((?:README\.md|package\.json|[A-Za-z0-9_.-]+\/[A-Za-z0-9_./@-]+\.[A-Za-z0-9]+|[A-Za-z0-9_.-]+\.[A-Za-z0-9]+))\b/g,
+  );
+  const paths = Array.from(matches)
+    .map((match) => (match[1] ?? match[2] ?? "").trim())
+    .map((path) => path.replace(/[),.:;]+$/, ""))
+    .filter((path) => path.length > 0)
+    .filter((path) => !path.startsWith("http"))
+    .filter((path) => !path.includes("github.com"))
+    .filter((path) => !path.includes(".."))
+    .filter((path) => !path.startsWith("."))
+    .filter((path) => !path.endsWith(".com"))
+    .filter((path) => path === "README.md" || path.includes("/") || path === "package.json" || path.includes("config"))
+    .slice(0, 8);
+
+  return Array.from(new Set(paths)).slice(0, 8).filter(Boolean).length > 0
+    ? Array.from(new Set(paths)).slice(0, 8)
+    : ["README.md"];
 }

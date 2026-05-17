@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseClaimExtractionResponse } from "@/lib/nbrain/claims";
+import { fallbackClaimsFromMarkdown, parseClaimExtractionResponse } from "@/lib/nbrain/claims";
 import { parseGitHubRepoUrl, parseMergedPrWebhookPayload } from "@/lib/nbrain/github";
 import { stableHash } from "@/lib/nbrain/hash";
 import { rankClaimsForPr } from "@/lib/nbrain/matcher";
@@ -62,6 +62,25 @@ describe("claim extraction parser", () => {
         claims: [{ text: "", kind: "made-up-kind" }],
       }),
     ).toThrow();
+  });
+});
+
+describe("fallback claim extraction", () => {
+  it("uses referenced source paths as claim evidence", () => {
+    const [claim] = fallbackClaimsFromMarkdown(
+      "section-code-map",
+      [
+        "# Codebase Map",
+        "",
+        "## Primary source paths",
+        "",
+        "- src/app/api/chat/route.ts",
+        "- convex/schema.ts",
+      ].join("\n"),
+    );
+
+    expect(claim?.coveredPaths).toEqual(["src/app/api/chat/route.ts", "convex/schema.ts"]);
+    expect(claim?.evidenceRefs).toEqual(["src/app/api/chat/route.ts", "convex/schema.ts"]);
   });
 });
 
