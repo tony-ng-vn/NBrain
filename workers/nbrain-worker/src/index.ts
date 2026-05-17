@@ -183,30 +183,19 @@ worker.webhook("githubPullRequestWebhook", {
 				const impactedSectionIds = unique(
 					matches.map((match) => match.claim.sectionId).filter(Boolean),
 				);
-				const autoUpdate = await autoApplyDirectEvidenceUpdate(
-					notion,
-					parsed,
-					changedFiles,
-					matches,
-				);
-
 				await updateMergedPrPage(notion, prPageId, {
 					changedFiles,
-					status: autoUpdate.applied ? "Applied" : "Ready for Agent",
+					status: "Ready for Agent",
 					impactedClaimIds,
 					impactedSectionIds,
 					agentSummary:
-						autoUpdate.applied
-							? `Applied 1 section update from direct changed-file evidence.`
-							: matches.length > 0
+						matches.length > 0
 							? `Ready for agent. Matched ${matches.length} impacted claim(s).`
 							: "Ready for agent. No matching claims found; likely needs review.",
 				});
 
 				console.log(
-					autoUpdate.applied
-						? `Merged PR #${parsed.number} applied a safe doc update`
-						: `Merged PR #${parsed.number} is ready for agent review`,
+					`Merged PR #${parsed.number} is ready for agent review`,
 				);
 			} catch (error) {
 				await updateMergedPrPage(notion, prPageId, {
