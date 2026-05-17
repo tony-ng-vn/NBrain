@@ -1,16 +1,16 @@
+import { ImportPanel } from "@/components/import-panel";
+
 export default function Home() {
   return (
     <main className="page-shell">
       <header className="app-header">
         <div>
           <h1>NBrain</h1>
-          <p>
-            Import a GitHub repository into a Notion-backed repo guide, extract
-            claims, and replay merged pull request updates.
-          </p>
+          <p>Notion-backed repo memory with claims, evidence, and review tasks.</p>
         </div>
         <div className="status-pill">Prototype</div>
       </header>
+      <ImportPanel />
     </main>
   );
 }

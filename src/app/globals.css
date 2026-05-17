@@ -122,13 +122,27 @@ a {
   background: #fff;
 }
 
+.field {
+  display: grid;
+  gap: 7px;
+}
+
+.field span {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
 .button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 1px solid var(--accent);
   border-radius: 6px;
   padding: 11px 14px;
   background: var(--accent);
   color: #fff;
   cursor: pointer;
+  text-decoration: none;
 }
 
 .button.secondary {
@@ -182,6 +196,18 @@ a {
 
 .success-text {
   color: var(--success);
+}
+
+.review-task {
+  border-top: 1px solid var(--line);
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
+.review-task p {
+  margin: 8px 0;
+  color: var(--muted);
+  line-height: 1.45;
 }
 
 @media (max-width: 840px) {
