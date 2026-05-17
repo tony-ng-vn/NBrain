@@ -197,7 +197,6 @@ export function createNotionAdapter(): NotionPort {
           parent: { data_source_id: await dataSourceId(notion, workspace.databases.docSections) },
           properties: {
             Name: titleProperty(section.title),
-            Repo: richTextProperty(section.repoFullName),
             "Section ID": richTextProperty(section.id),
             "Notion Page": urlProperty(section.notionUrl),
             "Source Markdown Hash": richTextProperty(section.sourceMarkdownHash),
@@ -233,7 +232,6 @@ export function createNotionAdapter(): NotionPort {
         parent: { data_source_id: await dataSourceId(notion, workspace.databases.mergedPrs) },
         properties: {
           Name: titleProperty(`PR #${event.number}: ${event.title}`),
-          Repo: richTextProperty(`${event.repo.owner}/${event.repo.repo}`),
           "PR Number": { number: event.number },
           "PR URL": urlProperty(event.htmlUrl),
           "Base Branch": richTextProperty(event.baseBranch),
