@@ -82,7 +82,15 @@ export function getNotionClient(): Client {
     throw new Error("NOTION_TOKEN is required for live Notion writes.");
   }
 
-  notionClient ??= new Client({ auth: token });
+  notionClient ??= new Client({
+    auth: token,
+    timeoutMs: 120_000,
+    retry: {
+      maxRetries: 4,
+      initialRetryDelayMs: 1_000,
+      maxRetryDelayMs: 15_000,
+    },
+  });
   return notionClient;
 }
 
